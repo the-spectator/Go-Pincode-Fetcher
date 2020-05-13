@@ -1,7 +1,7 @@
 package pincodeutils
 
 const (
-	BatchSize      = 1000
+	BatchSize      = 200
 	PincodeListKey = "pincodes"
 	CitiesKey      = "cities"
 )
