@@ -1,4 +1,4 @@
-package pincodeutils
+package service
 
 func DeleteEmpty(s []string) []string {
 	var r []string

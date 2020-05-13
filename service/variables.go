@@ -1,7 +1,11 @@
-package pincodeutils
+package service
 
 const (
-	BatchSize      = 200
 	PincodeListKey = "pincodes"
 	CitiesKey      = "cities"
+)
+
+var (
+	MaxGoroutines int
+	BatchSize     int
 )

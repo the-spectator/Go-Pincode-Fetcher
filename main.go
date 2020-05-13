@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"go-pincode-scanner/db"
-	"go-pincode-scanner/pincodeutils"
+	"go-pincode-scanner/service"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -82,7 +82,7 @@ func populatePincodesInRedis(pool *redis.Pool) (err error) {
 
 func getPincodeInfo(word string, conn redis.Conn) (pincodeResp pincodeAPIResponse) {
 	apiEndPoint := fmt.Sprintf("https://api.postalpincode.in/pincode/%s", word)
-	log.Printf("Hitting api for %s \n", apiEndPoint)
+	// log.Printf("Hitting api for %s \n", apiEndPoint)
 
 	resp, err := http.Get(apiEndPoint)
 	if err != nil {
@@ -96,7 +96,7 @@ func getPincodeInfo(word string, conn redis.Conn) (pincodeResp pincodeAPIRespons
 	}
 	db.IncrementAPICounter(conn)
 
-	log.Printf("Read all for %s \n", word)
+	// log.Printf("Read all for %s \n", word)
 
 	var r apiResponse
 	err = json.Unmarshal(body, &r)
@@ -104,42 +104,44 @@ func getPincodeInfo(word string, conn redis.Conn) (pincodeResp pincodeAPIRespons
 		log.Fatalf("Inside getPincodeInfo unmarshal %v at line 105", err)
 	}
 
-	log.Printf("Unmarshalled for %s \n", word)
+	// log.Printf("Unmarshalled for %s \n", word)
 
 	pincodeResp = r[0]
 	return
 }
 
-func performWork(pool *redis.Pool, maxGoroutines int, workLength int) (cities pincodes, err error) {
+func performWork(pool *redis.Pool, workLength int) (err error) {
 	var wg sync.WaitGroup
 
-	concurrency := pincodeutils.GetConcurrency(workLength)
-	maxChan := make(chan bool, maxGoroutines)
+	concurrency := service.GetConcurrency(workLength)
+	maxChan := make(chan bool, service.MaxGoroutines)
 
-	wg.Add(concurrency)
+	// wg.Add(concurrency)
 	log.Printf("My Concurrency %d\n", concurrency)
 
 	for i := 0; i < concurrency; i++ {
 		conn := pool.Get()
 		defer conn.Close()
-		codes, err := db.PopList(conn, pincodeutils.PincodeListKey, pincodeutils.BatchSize)
+		codes, err := db.PopList(conn, service.PincodeListKey, service.BatchSize)
 		if err != nil {
 			log.Fatalf("Inside FOr loop concurrency with error %v at line 128", err)
 		}
 
 		maxChan <- true
+		wg.Add(1)
 
 		log.Printf("LOOPING for %d \n", i)
-		go func(codes pincodes, maxChan chan bool, pool *redis.Pool) {
+		go func(codes pincodes, maxChan chan bool, pool *redis.Pool, index int) {
 			newConn := pool.Get()
 
 			defer wg.Done()
 			defer newConn.Close()
+			defer func() { log.Printf("Work Done for job %d", index) }()
 			defer func(maxChan chan bool) { <-maxChan }(maxChan)
 
 			for _, code := range codes {
 				resp := getPincodeInfo(code, newConn)
-				log.Printf("Got response for code %s\n", code)
+				// log.Printf("Got response for code %s\n", code)
 				for _, po := range resp.PostOffice {
 					err = db.AppendToCities(conn, po.Block)
 					if err != nil {
@@ -147,31 +149,33 @@ func performWork(pool *redis.Pool, maxGoroutines int, workLength int) (cities pi
 					}
 				}
 			}
-		}(codes, maxChan, pool)
+		}(codes, maxChan, pool, i)
 	}
 	wg.Wait()
-
-	conn := pool.Get()
-	defer conn.Close()
-	cities, err = db.ListCities(conn)
-	if err != nil {
-		log.Fatalf("Inside performWork list cities with error %v", err)
-		return
-	}
 	return
 
+}
+
+func parseFlags() {
+	maxGoroutines := flag.Int("maxGoroutines", 2, "the number of goroutines that are allowed to run concurrently")
+	batchSize := flag.Int("batchSize", 500, "the batch size of pincodes to be processed by go routine")
+
+	flag.Parse()
+	service.MaxGoroutines = *maxGoroutines
+	service.BatchSize = *batchSize
+
+	log.Printf("Max Goroutines %d \n", service.MaxGoroutines)
+	log.Printf("Batch Size %d \n", service.BatchSize)
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	maxGoroutines := flag.Int("maxGoroutines", 2, "the number of goroutines that are allowed to run concurrently")
-	flag.Parse()
-	log.Printf("Max Goroutines %d \n", *maxGoroutines)
+	parseFlags()
 	pool := db.NewPool()
 	conn := pool.Get()
 
-	_ = db.ResetList(conn, pincodeutils.PincodeListKey)
+	_ = db.ResetList(conn, service.PincodeListKey)
 	db.ResetAPICounter(conn)
 
 	err := populatePincodesInRedis(pool)
@@ -182,7 +186,7 @@ func main() {
 	startTime := time.Now()
 	log.Printf("Starting the at %v", startTime)
 
-	workLength, err := db.LengthOfList(conn, pincodeutils.PincodeListKey)
+	workLength, err := db.LengthOfList(conn, service.PincodeListKey)
 	if err != nil {
 		log.Fatalf("Inside Main populate Length of the list err %v", err)
 		return
@@ -190,11 +194,12 @@ func main() {
 
 	log.Printf("GOt codes %d \n", workLength)
 
-	cities, _ := performWork(pool, *maxGoroutines, workLength)
+	_ = performWork(pool, workLength)
 
-	log.Printf("Compted the Process in %v", time.Since(startTime))
+	log.Printf("Completed the Process in %v", time.Since(startTime))
 
 	log.Println("\n\n=============================================")
+	cities, _ := db.ListCities(conn)
 	log.Println(cities)
 	log.Println("=================================================")
 }
