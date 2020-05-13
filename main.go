@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go-pincode-scanner/db"
+	"go-pincode-scanner/pincodeutils"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 )
 
@@ -36,16 +40,6 @@ type postOffice struct {
 
 type pincodes []string
 
-func delete_empty(s []string) []string {
-	var r []string
-	for _, str := range s {
-		if str != "" {
-			r = append(r, str)
-		}
-	}
-	return r
-}
-
 func readFile() (codes pincodes, err error) {
 	var file *os.File
 
@@ -62,6 +56,7 @@ func readFile() (codes pincodes, err error) {
 	// initial size of our wordlist
 	bufferSize := 100
 	codes = make(pincodes, bufferSize)
+	r, _ := regexp.Compile("[0-9]+")
 	pos := 0
 
 	for scanner.Scan() {
@@ -72,8 +67,11 @@ func readFile() (codes pincodes, err error) {
 			break
 		}
 
-		codes[pos] = scanner.Text()
-		pos++
+		x := scanner.Text()
+		if r.MatchString(x) {
+			codes[pos] = x
+			pos++
+		}
 
 		if pos >= len(codes) {
 			// expand the buffer by 100 again
@@ -82,7 +80,7 @@ func readFile() (codes pincodes, err error) {
 		}
 	}
 	fmt.Println(len(codes))
-	codes = delete_empty(codes)
+	codes = pincodeutils.DeleteEmpty(codes)
 	return
 }
 
@@ -112,64 +110,35 @@ func getPincodeInfo(word string) (pincodeResp pincodeAPIResponse) {
 	return
 }
 
-// func hitMe(codes pincodes) {
-// 	for _, code := range codes {
-// 		resp := getPincodeInfo(code)
-// 		for _, po := range resp.postOffices {
-// 			fmt.Println(po.Block)
-// 		}
-// 	}
-// }
-
-func main() {
-	maxGoroutines := flag.Int("maxGoroutines", 2, "the number of goroutines that are allowed to run concurrently")
-	flag.Parse()
-
-	codes, err := readFile()
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	fmt.Printf("GOt codes %d \n", len(codes))
-
-	batch := 100
-	cityMap := make(map[string]bool)
-	cities := []string{}
-	concurrency := len(codes) / batch
-	if remainder := len(codes) % batch; remainder != 0 {
-		concurrency++
-	}
-
-	fmt.Printf("Max Goroutines %d \n", *maxGoroutines)
-	maxChan := make(chan bool, *maxGoroutines)
-
+func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error) {
+	concurrency := pincodeutils.GetConcurrency(len(codes))
+	maxChan := make(chan bool, maxGoroutines)
+	workLength := len(codes)
+	pool := db.NewPool()
+	conn := pool.Get()
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
 
 	for i := 0; i < concurrency; i++ {
-		startIndex := (i * batch) + 1
-		endIndex := (startIndex + batch)
-		if endIndex > len(codes) {
-			endIndex = len(codes)
-		}
+		startIndex, endIndex := pincodeutils.GetPartitionIndexes(workLength, i)
 		maxChan <- true
 
 		fmt.Printf("LOOPING for %d \n", i)
 
 		go func(codes pincodes, maxChan chan bool, idex int) {
-			fmt.Printf("GOt codes %d & i of %d\n", len(codes), idex)
+			fmt.Printf("GOt codes %d & i of %d\n", workLength, idex)
+
 			defer wg.Done()
 			defer func(maxChan chan bool) { <-maxChan }(maxChan)
 
 			for _, code := range codes {
 				resp := getPincodeInfo(code)
-				fmt.Printf("Got response for %s \n", code)
-				// fmt.Println(resp)
+				// fmt.Printf("Got response for %s \n", code)
+
 				for _, po := range resp.PostOffice {
-					// fmt.Println(po.Block)
-					if _, value := cityMap[po.Block]; !value {
-						cityMap[po.Block] = true
-						cities = append(cities, po.Block)
+					err = db.AppendToCities(conn, po.Block)
+					if err != nil {
+						log.Fatal(err)
 					}
 				}
 			}
@@ -177,6 +146,29 @@ func main() {
 
 	}
 	wg.Wait()
+
+	cities, err = db.ListCitites(conn)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	return
+
+}
+
+func main() {
+	maxGoroutines := flag.Int("maxGoroutines", 2, "the number of goroutines that are allowed to run concurrently")
+	flag.Parse()
+	fmt.Printf("Max Goroutines %d \n", *maxGoroutines)
+
+	pinCodes, err := readFile()
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Printf("GOt codes %d \n", len(pinCodes))
+
+	cities, _ := performWork(pinCodes, *maxGoroutines)
+
 	fmt.Println("\n\n=============================================")
 	fmt.Println(cities)
 	fmt.Println("=================================================")
