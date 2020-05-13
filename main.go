@@ -42,24 +42,23 @@ type postOffice struct {
 
 type pincodes []string
 
-func readFile() (codes pincodes, err error) {
+func populatePincodesInRedis(pool *redis.Pool) (err error) {
 	var file *os.File
 
 	file, err = os.Open("pincodes.txt")
 	if err != nil {
 		fmt.Println(err)
+		fmt.Println("Inside populatePincodesInRedis")
 		return
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanWords)
+	conn := pool.Get()
+	defer conn.Close()
 
-	// initial size of our wordlist
-	bufferSize := 100
-	codes = make(pincodes, bufferSize)
 	r, _ := regexp.Compile("[0-9]+")
-	pos := 0
 
 	for scanner.Scan() {
 		if err := scanner.Err(); err != nil {
@@ -71,18 +70,13 @@ func readFile() (codes pincodes, err error) {
 
 		x := scanner.Text()
 		if r.MatchString(x) {
-			codes[pos] = x
-			pos++
-		}
-
-		if pos >= len(codes) {
-			// expand the buffer by 100 again
-			newbuf := make([]string, bufferSize)
-			codes = append(codes, newbuf...)
+			err := db.AppendToPincodes(conn, x)
+			if err != nil {
+				fmt.Println("Inside populatePincodesInRedis scanner block")
+				return err
+			}
 		}
 	}
-	fmt.Println(len(codes))
-	codes = pincodeutils.DeleteEmpty(codes)
 	return
 }
 
@@ -93,17 +87,22 @@ func getPincodeInfo(word string) (pincodeResp pincodeAPIResponse) {
 	resp, err := http.Get(apiEndPoint)
 	if err != nil {
 		fmt.Println(err)
+		fmt.Println("Inside getPincodeInfo http")
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Got Problem in reading for pincode %s", word)
+		log.Fatal("error %v", err)
+	}
 
 	fmt.Printf("Read all for %s \n", word)
 
 	var r apiResponse
 	err = json.Unmarshal(body, &r)
 	if err != nil {
-		fmt.Println(err)
+		log.Fatalf("Inside getPincodeInfo unmarshal %v at line 105", err)
 	}
 
 	fmt.Printf("Unmarshalled for %s \n", word)
@@ -112,55 +111,53 @@ func getPincodeInfo(word string) (pincodeResp pincodeAPIResponse) {
 	return
 }
 
-func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error) {
-	concurrency := pincodeutils.GetConcurrency(len(codes))
-	fmt.Println(concurrency)
-	maxChan := make(chan bool, maxGoroutines)
-	workLength := len(codes)
-	pool := db.NewPool()
-	conn := pool.Get()
+func performWork(pool *redis.Pool, maxGoroutines int, workLength int) (cities pincodes, err error) {
 	var wg sync.WaitGroup
-	wg.Add(concurrency)
 
-	// _ = db.ResetCities(conn)
+	concurrency := pincodeutils.GetConcurrency(workLength)
+	maxChan := make(chan bool, maxGoroutines)
+
+	wg.Add(concurrency)
+	fmt.Printf("My Concurrency %d\n", concurrency)
 
 	for i := 0; i < concurrency; i++ {
-		startIndex, endIndex := pincodeutils.GetPartitionIndexes(workLength, i)
+		conn := pool.Get()
+		defer conn.Close()
+		codes, err := db.PopList(conn, pincodeutils.PincodeListKey, pincodeutils.BatchSize)
+		if err != nil {
+			log.Fatalf("Inside FOr loop concurrency with error %v at line 128", err)
+		}
+
 		maxChan <- true
 
 		fmt.Printf("LOOPING for %d \n", i)
-
-		go func(codes pincodes, maxChan chan bool, idex int, pool *redis.Pool) {
-			fmt.Printf("GOt codes %d & i of %d\n", workLength, idex)
-			conn := pool.Get()
+		go func(codes pincodes, maxChan chan bool, pool *redis.Pool) {
+			newConn := pool.Get()
 
 			defer wg.Done()
-			defer conn.Close()
+			defer newConn.Close()
 			defer func(maxChan chan bool) { <-maxChan }(maxChan)
 
 			for _, code := range codes {
-				if db.Exists(conn, code) {
-					fmt.Println("Already exists %s", code)
-					continue
-				}
 				resp := getPincodeInfo(code)
-				// fmt.Printf("Got response for %s \n", code)
-
+				log.Printf("Got response for code %s\n", code)
 				for _, po := range resp.PostOffice {
 					err = db.AppendToCities(conn, po.Block)
 					if err != nil {
-						log.Fatal(err)
+						log.Fatalf("Inside go-routine postoffice loop %v", err)
 					}
 				}
 			}
-		}(codes[startIndex:endIndex], maxChan, i, pool)
-
+		}(codes, maxChan, pool)
 	}
 	wg.Wait()
 
+	conn := pool.Get()
+	defer conn.Close()
 	cities, err = db.ListCities(conn)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println("Inside performWork list cities")
+		log.Fatal("error %v", err)
 		return
 	}
 	return
@@ -168,17 +165,30 @@ func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error)
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	maxGoroutines := flag.Int("maxGoroutines", 2, "the number of goroutines that are allowed to run concurrently")
 	flag.Parse()
 	fmt.Printf("Max Goroutines %d \n", *maxGoroutines)
+	pool := db.NewPool()
+	conn := pool.Get()
+	_ = db.ResetList(conn, pincodeutils.PincodeListKey)
 
-	pinCodes, err := readFile()
+	err := populatePincodesInRedis(pool)
 	if err != nil {
+		fmt.Println("Inside Main populate Pincodes err")
 		fmt.Println(err)
 	}
-	fmt.Printf("GOt codes %d \n", len(pinCodes))
+	workLength, err := db.LengthOfList(conn, pincodeutils.PincodeListKey)
+	if err != nil {
+		fmt.Println("Inside Main populate Length of the list err")
+		log.Fatal("error %v", err)
+		return
+	}
 
-	cities, _ := performWork(pinCodes, *maxGoroutines)
+	fmt.Printf("GOt codes %d \n", workLength)
+
+	cities, _ := performWork(pool, *maxGoroutines, workLength)
 
 	fmt.Println("\n\n=============================================")
 	fmt.Println(cities)
