@@ -122,7 +122,7 @@ func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error)
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
 
-	_ = db.ResetCities(conn)
+	// _ = db.ResetCities(conn)
 
 	for i := 0; i < concurrency; i++ {
 		startIndex, endIndex := pincodeutils.GetPartitionIndexes(workLength, i)
@@ -139,6 +139,10 @@ func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error)
 			defer func(maxChan chan bool) { <-maxChan }(maxChan)
 
 			for _, code := range codes {
+				if db.Exists(conn, code) {
+					fmt.Println("Already exists %s", code)
+					continue
+				}
 				resp := getPincodeInfo(code)
 				// fmt.Printf("Got response for %s \n", code)
 

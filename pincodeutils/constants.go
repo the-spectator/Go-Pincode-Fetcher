@@ -1,5 +1,5 @@
 package pincodeutils
 
 const (
-	BatchSize = 5000
+	BatchSize = 1500
 )

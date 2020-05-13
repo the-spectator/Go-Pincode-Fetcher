@@ -25,6 +25,15 @@ func NewPool() *redis.Pool {
 	}
 }
 
+func Exists(conn redis.Conn, value string) bool {
+	val, err := redis.Bool(conn.Do("SISMEMBER", "cities", value))
+	if err != nil {
+		log.Fatal(err)
+		return val
+	}
+	return val
+}
+
 func AppendToCities(conn redis.Conn, value string) error {
 	_, err := conn.Do("SADD", "cities", value)
 	// defer conn.Close()
