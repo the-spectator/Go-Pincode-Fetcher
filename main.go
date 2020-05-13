@@ -13,6 +13,8 @@ import (
 	"os"
 	"regexp"
 	"sync"
+
+	"github.com/gomodule/redigo/redis"
 )
 
 type apiResponse []pincodeAPIResponse
@@ -112,6 +114,7 @@ func getPincodeInfo(word string) (pincodeResp pincodeAPIResponse) {
 
 func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error) {
 	concurrency := pincodeutils.GetConcurrency(len(codes))
+	fmt.Println(concurrency)
 	maxChan := make(chan bool, maxGoroutines)
 	workLength := len(codes)
 	pool := db.NewPool()
@@ -119,16 +122,20 @@ func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error)
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
 
+	_ = db.ResetCities(conn)
+
 	for i := 0; i < concurrency; i++ {
 		startIndex, endIndex := pincodeutils.GetPartitionIndexes(workLength, i)
 		maxChan <- true
 
 		fmt.Printf("LOOPING for %d \n", i)
 
-		go func(codes pincodes, maxChan chan bool, idex int) {
+		go func(codes pincodes, maxChan chan bool, idex int, pool *redis.Pool) {
 			fmt.Printf("GOt codes %d & i of %d\n", workLength, idex)
+			conn := pool.Get()
 
 			defer wg.Done()
+			defer conn.Close()
 			defer func(maxChan chan bool) { <-maxChan }(maxChan)
 
 			for _, code := range codes {
@@ -142,12 +149,12 @@ func performWork(codes pincodes, maxGoroutines int) (cities pincodes, err error)
 					}
 				}
 			}
-		}(codes[startIndex:endIndex], maxChan, i)
+		}(codes[startIndex:endIndex], maxChan, i, pool)
 
 	}
 	wg.Wait()
 
-	cities, err = db.ListCitites(conn)
+	cities, err = db.ListCities(conn)
 	if err != nil {
 		log.Fatal(err)
 		return

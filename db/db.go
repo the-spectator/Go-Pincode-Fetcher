@@ -10,7 +10,7 @@ import (
 func NewPool() *redis.Pool {
 	return &redis.Pool{
 		// Maximum number of idle connections in the pool.
-		MaxIdle: 80,
+		MaxIdle: 1500,
 		// max number of connections
 		MaxActive: 12000,
 		// Dial is an application supplied function for creating and
@@ -27,17 +27,27 @@ func NewPool() *redis.Pool {
 
 func AppendToCities(conn redis.Conn, value string) error {
 	_, err := conn.Do("SADD", "cities", value)
+	// defer conn.Close()
+
 	if err != nil {
 		log.Fatal(err)
 	}
 	return err
 }
 
-func ListCitites(conn redis.Conn) (cities []string, err error) {
+func ListCities(conn redis.Conn) (cities []string, err error) {
 	cities, err = redis.Strings(conn.Do("SMEMBERS", "cities"))
+	// defer conn.Close()
+
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
 	return
+}
+
+func ResetCities(conn redis.Conn) error {
+	// defer conn.Close()
+	_, err := conn.Do("DEL", "cities")
+	return err
 }
