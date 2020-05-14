@@ -5,6 +5,8 @@ import (
 
 	"log"
 
+	"go-pincode-scanner/service"
+
 	"github.com/gomodule/redigo/redis"
 )
 
@@ -92,9 +94,14 @@ func ResetList(conn redis.Conn, listKey string) error {
 }
 
 func IncrementAPICounter(conn redis.Conn) {
-	_, _ = conn.Do("INCR", "apiCount")
+	_, _ = conn.Do("INCR", service.APICounter)
 }
 
 func ResetAPICounter(conn redis.Conn) {
-	_, _ = conn.Do("SET", "apiCount", 0)
+	_, _ = conn.Do("SET", service.APICounter, 0)
+}
+
+func GetAPICounter(conn redis.Conn) (counter int) {
+	counter, _ = redis.Int(conn.Do("GET", service.APICounter))
+	return
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"sync"
 	"time"
 
@@ -170,6 +171,7 @@ func parseFlags() {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	parseFlags()
 	pool := db.NewPool()
@@ -196,7 +198,10 @@ func main() {
 
 	_ = performWork(pool, workLength)
 
-	log.Printf("Completed the Process in %v", time.Since(startTime))
+	defer func() {
+		log.Printf("Number of request hit are %d", db.GetAPICounter(conn))
+		log.Printf("Completed the Process in %v", time.Since(startTime))
+	}()
 
 	log.Println("\n\n=============================================")
 	cities, _ := db.ListCities(conn)
